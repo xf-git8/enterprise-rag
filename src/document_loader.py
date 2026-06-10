@@ -1,7 +1,8 @@
-# 文档加载分割过程
+# 定义文档加载器分割类
+
 import os
-from os.path import split
 from typing import List
+
 # 导入 LangChain 提供的多种文档加载器，用于处理不同格式的本地文件
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader, DirectoryLoader
 # 导入 LangChain 提供的文档对象，用于封装文档内容

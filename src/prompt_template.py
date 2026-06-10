@@ -1,7 +1,7 @@
+# 定义提示词模板类
 from typing import List
 from langchain_core.documents import Document
 
-# 定义提示词模板类
 class PromptBuilder:
     def __init__(self):
         self.system_prompt = """
