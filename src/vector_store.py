@@ -1,7 +1,7 @@
 import os
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from  langchain_chroma import Chroma
 from typing import List
 
 from src.config import Config, config
@@ -92,4 +92,4 @@ class VectorStoreManager:
 
 
 # 创建 向量数据库对象供使用
-vector_store_manger = VectorStoreManager()
+vector_store_manager = VectorStoreManager()
