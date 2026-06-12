@@ -1,13 +1,9 @@
-# hf-token
-from huggingface_hub import login
-login(token="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")
 # 初始化向量库
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.document_loader import DocumentProcessor, save_chunks_to_files, documentProcessor
+from src.document_loader import DocumentProcessor
 from src.vector_store import vector_store_manager
-
 
 def main():
     import argparse
@@ -26,7 +22,6 @@ def main():
     try:
         docs = processor.process_documents(args.input_path)
         print(f"文档切分完成，共 {len(docs)} 个片段")
-        save_chunks_to_files(documentProcessor, './data/documents', './data/chunk_documents')
         print("添加到向量数据库...")
         vector_store_manager.add_documents(docs)
 

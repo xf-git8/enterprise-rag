@@ -1,9 +1,9 @@
 # config.py
 import os
 from dotenv import load_dotenv
-
+# 执行加载操作，
+# 使 .env 文件中的变量可以在当前 Python 环境中通过 os.getenv() 获取
 load_dotenv()
-
 
 class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -23,11 +23,8 @@ class Config:
 
     @classmethod
     def validate(cls):
-        """根据当前选择的 LLM 提供商，校验对应的环境变量是否已配置"""
         if cls.LLM_PROVIDER == "openai" and not cls.OPENAI_API_KEY:
-            raise ValueError("❌ 缺少 OPENAI_API_KEY，请在 .env 中配置")
+            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER is openai")
         if cls.LLM_PROVIDER == "dashscope" and not cls.DASHSCOPE_API_KEY:
-            raise ValueError("❌ 缺少 DASHSCOPE_API_KEY，请在 .env 中配置")
-
-
+            raise ValueError("DASHSCOPE_API_KEY is required when LLM_PROVIDER is dashscope")
 config = Config()

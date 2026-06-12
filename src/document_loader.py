@@ -1,11 +1,11 @@
-import os
-import tempfile
-import platform
-import pdfplumber
 import pytesseract
 from PIL import Image
 from typing import List
+import os, chardet, tempfile
+import platform
+import pdfplumber
 from src.config import config
+from src.utils import utils
 from pdf2image import convert_from_path
 from docx import Document as DocxDocument
 from langchain_core.documents import Document
@@ -25,262 +25,303 @@ class DocumentProcessor:
         self.enable_ocr = enable_ocr
         # 用于保证跨文件、跨批次切分时 chunk_id 的全局唯一性
         self._global_chunk_counter = 0
-        # 调用本类内部方法获取poppler_path
+
+        # 调用本类内部方法获取路径
         self.poppler_path = self._get_poppler_path()
-        # 调用本类内部方法获取tesseract_path
         self.tesseract_path = self._setup_tesseract_path()
 
     def _setup_tesseract_path(self):
         """智能配置 Tesseract OCR 引擎路径"""
         if platform.system() != "Windows":
-            return  # Linux/Mac 依赖系统 PATH，通常不需要手动配置
-        # 1. 优先从你的项目配置文件或环境变量读取（最灵活）
+            return  # Linux/Mac 依赖系统 PATH
+
+        # 1. 优先从配置读取
         env_path = getattr(config, 'TESSERACT_BIN_PATH', None)
         if env_path and os.path.exists(env_path):
             pytesseract.pytesseract.tesseract_cmd = env_path
             print(f"从配置加载 Tesseract 路径: {env_path}")
             return
-        # 2. 尝试常见的默认安装路径
+
+        # 2. 尝试常见的默认路径 (请根据你的实际安装情况调整)
         default_paths = [
             r"E:\damoxing\python-project\help_ocr\tesseract\install\tesseract.exe",
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # 常见安装路径
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         ]
-
         for path in default_paths:
             if os.path.exists(path):
                 pytesseract.pytesseract.tesseract_cmd = path
                 print(f"自动发现 Tesseract 路径: {path}")
                 return
-
         print("警告: 未在 Windows 上找到 Tesseract，OCR 功能将无法使用！")
 
     def _get_poppler_path(self):
-        """
-        智能获取 Poppler 路径：
-        1. 如果是 Linux/Mac，直接返回 None (依赖系统 PATH)
-        2. 如果是 Windows，优先读取环境变量，否则尝试常见默认路径
-        """
+        """智能获取 Poppler 路径"""
         if platform.system() != "Windows":
             return None
-        # 1. 尝试从环境变量读取（最灵活，推荐在 .env 文件中配置）
-        env_path = config.POPPLER_BIN_PATH
+
+        # 1. 尝试从配置读取
+        env_path = getattr(config, 'POPPLER_BIN_PATH', None)
         if env_path and os.path.exists(env_path):
             return env_path
-            # 2. 尝试常见的默认安装路径 (根据你的实际解压位置修改)
+
+        # 2. 尝试常见的默认路径
         default_paths = [
             r"E:\damoxing\python-project\help_ocr\poppler-26.02.0\Library\bin",
-            r"C:\Program Files\poppler\Library\bin",
+            r"C:\Program Files\poppler\Library\bin",  # 常见安装路径
             r".\poppler\Library\bin"
         ]
         for path in default_paths:
-            if os.path.exists(os.path.join(path, "pdftoppm.exe")):
+            # 检查目录下是否存在 pdftoppm.exe (Windows) 或 pdftoppm (Linux/Mac)
+            exe_name = "pdftoppm.exe" if platform.system() == "Windows" else "pdftoppm"
+            if os.path.exists(os.path.join(path, exe_name)):
                 print(f"自动发现 Poppler 路径: {path}")
                 return path
-
-        print(" 警告: 未在 Windows 上找到 Poppler 路径，PDF 扫描件处理可能会失败。")
+        print("警告: 未在 Windows 上找到 Poppler 路径，PDF 扫描件处理可能会失败。")
         return None
 
-    def _extract_text_from_pdf_with_ocr(self, file_path: str) -> str:
-        """
-        智能提取 PDF 文本：优先提取原生文本，若文本极少（判定为扫描件），则整页 OCR。
-        :param file_path: pdf 文件路径
-        :return: 提取文本的内容
-        """
+    def _extract_text_from_pdf_with_ocr(self, file_path: str, encoding: str) -> str:
+        """智能提取 PDF 文本"""
         full_text = ""
         try:
             with pdfplumber.open(file_path) as pdf:
-                # 尝试提取前几页的原生文本，判断是否为扫描件
+                # 判断是否为扫描件
                 sample_text = ""
                 for page in pdf.pages[:3]:
                     text = page.extract_text()
                     if text:
                         sample_text += text
 
-                is_scanned = len(sample_text.strip()) < 50  # 阈值设定：如果前3页提取字符少于50个，视为扫描件
+                # 【修复点】使用防御性清洗，防止 utils 报错
+                try:
+                    sample_text = utils._process_text(sample_text) if hasattr(utils,
+                                                                              '_process_text') else sample_text.strip()
+                except Exception as e:
+                    sample_text = sample_text.strip()
 
-                # 【第二步】根据判断结果选择处理方式
+                is_scanned = len(sample_text.strip()) < 50
+
                 if not is_scanned:
-                    # 正常文档型 PDF：逐页提取文本 + 局部图片OCR
+                    # 原生文本提取
                     for page_num, page in enumerate(pdf.pages, 1):
                         page_text = page.extract_text()
                         if page_text:
+                            try:
+                                page_text = utils._process_text(page_text) if hasattr(utils,
+                                                                                      '_process_text') else page_text.strip()
+                            except:
+                                page_text = page_text.strip()
                             full_text += page_text + "\n\n"
 
+                        # 图片 OCR
                         if self.enable_ocr:
                             try:
                                 for img in page.images:
-                                    x0, top, x1, bottom = img["x0"], img["top"], img["x1"], img["bottom"]
-                                    img_crop = page.crop((x0, top, x1, bottom))
-                                    img_obj = img_crop.to_image()
+                                    # ... (crop logic) ...
+                                    img_obj = page.crop((img["x0"], img["top"], img["x1"], img["bottom"])).to_image()
                                     ocr_text = pytesseract.image_to_string(img_obj.original, lang="chi_sim+eng")
                                     if ocr_text.strip():
+                                        try:
+                                            ocr_text = utils._process_text(ocr_text) if hasattr(utils,
+                                                                                                '_process_text') else ocr_text.strip()
+                                        except:
+                                            ocr_text = ocr_text.strip()
                                         full_text += f"[图片OCR识别内容]:\n{ocr_text}\n\n"
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                print(f"页面图片OCR异常: {e}")
                 else:
-                    # 扫描件 PDF：使用 pdf2image 将整页转为图片后全量 OCR
+                    # 扫描件处理
                     if not self.enable_ocr:
-                        raise ValueError("当前PDF为扫描件且未开启OCR功能，无法提取文本。")
-
-                    print(f"检测到扫描件格式，正在将 {file_path} 转换为图片并进行OCR...")
-                    # dpi=200 保证识别清晰度
-                    pages = convert_from_path(
-                        file_path,
-                        dpi=200,
-                        poppler_path=self.poppler_path)
+                        raise ValueError("扫描件且未开启OCR")
+                    print(f"检测到扫描件: {file_path}")
+                    pages = convert_from_path(file_path, dpi=200, poppler_path=self.poppler_path)
                     for page_num, page_img in enumerate(pages, 1):
                         try:
                             ocr_text = pytesseract.image_to_string(page_img, lang="chi_sim+eng")
                             if ocr_text.strip():
                                 full_text += f"=== 第{page_num}页 ===\n{ocr_text}\n\n"
                         except Exception as e:
-                            print(f"第{page_num}页OCR失败: {e}")
-
+                            print(f"扫描件第{page_num}页识别失败: {e}")
         except Exception as e:
-            raise ValueError(f"处理pdf文件失败:{str(e)}")
+            print(f"处理PDF失败 {file_path}: {e}")
         return full_text
 
-    def _extract_text_from_doc_with_ocr(self, file_path: str) -> str:
-        """
-        使用 python-docx 提取 Word 文本，并对内嵌图片进行 OCR 识别
-        """
+    def _extract_text_from_doc_with_ocr(self, file_path: str, encoding: str) -> str:
+        """提取 Word 文本"""
         full_text = ""
         try:
             doc = DocxDocument(file_path)
+            # 段落
             for paragraph in doc.paragraphs:
                 if paragraph.text.strip():
                     full_text += paragraph.text + "\n\n"
-            # 处理word表格内容为markdown
+
+            # 表格转 Markdown
             for table in doc.tables:
                 table_lines = []
-                for row_idx, row in enumerate(table.rows):
+                for row in table.rows:
                     cells = [cell.text.strip() for cell in row.cells]
                     table_lines.append("| " + " | ".join(cells) + " |")
-                    if row_idx == 0:
-                        table_lines.append("| " + " | ".join(["---"] * len(cells)) + " |")
                 if table_lines:
+                    # 添加表头分隔线
+                    if len(table_lines) > 1:
+                        header = table_lines[0]
+                        sep = "| " + " | ".join(["---"] * len(header.split("|")[1:-1])) + " |"
+                        table_lines.insert(1, sep)
                     full_text += "\n".join(table_lines) + "\n\n"
-            # 开启ocr扫描处理
+
+            # 图片 OCR
             if self.enable_ocr:
                 try:
                     with tempfile.TemporaryDirectory() as temp_dir:
                         for i, shape in enumerate(doc.inline_shapes):
-                            if shape.type == 3:
+                            if shape.type == 3:  # 内嵌图片
                                 img_path = os.path.join(temp_dir, f"image_{i}.png")
-                                image = shape.image
-                                # 写入文件
                                 with open(img_path, "wb") as f:
-                                    f.write(image.blob)
+                                    f.write(shape.image.blob)
                                 img = Image.open(img_path)
                                 ocr_text = pytesseract.image_to_string(img, lang="chi_sim+eng")
                                 if ocr_text.strip():
+                                    try:
+                                        ocr_text = utils._process_text(ocr_text) if hasattr(utils,
+                                                                                            '_process_text') else ocr_text.strip()
+                                    except:
+                                        ocr_text = ocr_text.strip()
                                     full_text += f"[图片OCR识别内容]:\n{ocr_text}\n\n"
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Word图片OCR异常: {e}")
         except Exception as e:
-            raise ValueError(f"处理Word文件失败: {str(e)}")
+            print(f"处理Word失败: {e}")
+
+        # 【修复点】统一清洗
+        try:
+            full_text = utils._process_text(full_text) if hasattr(utils, '_process_text') else full_text.strip()
+        except:
+            full_text = full_text.strip()
         return full_text
 
-    # 如果是文件就直接切分分文件
+    def pre_detect_encoding(self, file_path: str, sample_size: int = 10240) -> str:
+        """探测文件编码"""
+        try:
+            with open(file_path, 'rb') as f:
+                raw = f.read(sample_size)
+            result = chardet.detect(raw)
+            if result['confidence'] < 0.7:
+                return 'utf-8'
+            return result['encoding'].lower()
+        except Exception:
+            return 'utf-8'
+
     def load_document(self, file_path: str) -> List[Document]:
-        """根据文件路径，读取并切割单个文档"""
+        """加载单个文件"""
+        encoding = self.pre_detect_encoding(file_path)
         ext_name = os.path.splitext(file_path)[1].lower()
+
         if ext_name == ".pdf":
-            full_text = self._extract_text_from_pdf_with_ocr(file_path)
+            full_text = self._extract_text_from_pdf_with_ocr(file_path, encoding)
             documents = [Document(page_content=full_text, metadata={"source": file_path})]
         elif ext_name in [".docx", ".doc"]:
-            full_text = self._extract_text_from_doc_with_ocr(file_path)
+            full_text = self._extract_text_from_doc_with_ocr(file_path, encoding)
             documents = [Document(page_content=full_text, metadata={"source": file_path})]
         elif ext_name == ".txt":
-            loader = TextLoader(file_path, encoding='utf-8')
+            loader = TextLoader(file_path, encoding=encoding)
             documents = loader.load()
         else:
-            raise ValueError(f"Unsupported file type: {ext_name}")
+            raise ValueError(f"不支持的文件类型: {ext_name}")
 
         return self.split_documents(documents)
 
-    # 如果是文件夹，递归遍历所有文件切割
     def load_directory(self, directory_path: str) -> List[Document]:
-        """递归读取目录下所有支持的文档"""
+        """加载目录"""
         all_documents = []
         try:
-            # root _ file 当前文件夹路径，子文件夹（用不到_表示） 文件列表
             for root, _, files in os.walk(directory_path):
                 for file_name in files:
                     file_path = os.path.join(root, file_name)
-                    # 通过splitext获取文件扩展名
                     ext = os.path.splitext(file_path)[1].lower()
+
+                    # 跳过非目标文件
+                    if ext not in [".txt", ".pdf", ".docx", ".doc"]:
+                        continue
+
+                    encoding = self.pre_detect_encoding(file_path)
                     docs = []
+
                     if ext == ".txt":
-                        loader = TextLoader(file_path, encoding='utf-8')
+                        loader = TextLoader(file_path, encoding=encoding)
                         docs = loader.load()
                     elif ext == ".pdf":
-                        full_text = self._extract_text_from_pdf_with_ocr(file_path)
+                        full_text = self._extract_text_from_pdf_with_ocr(file_path, encoding)
                         docs = [Document(page_content=full_text, metadata={"source": file_path})]
                     elif ext in [".docx", ".doc"]:
-                        full_text = self._extract_text_from_doc_with_ocr(file_path)
+                        full_text = self._extract_text_from_doc_with_ocr(file_path, encoding)
                         docs = [Document(page_content=full_text, metadata={"source": file_path})]
-                    else:
-                        continue
+
                     all_documents.extend(docs)
             return self.split_documents(all_documents)
         except Exception as e:
-            print(f"Error loading directory: {e}")
+            print(f"加载目录失败: {e}")
             return []
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
-        """将多个文档内容切割成带有元数据的小文本块"""
+        """切分文档"""
         if self.text_splitter is None:
-            raise ValueError("Text splitter is not initialized.")
+            raise ValueError("切分器未初始化")
+
         split_docs = self.text_splitter.split_documents(documents)
+
+        # 保存切块到本地
+        self.save_chunks_to_local(split_docs)
+
+        # 设置 Chunk ID
         for doc in split_docs:
             doc.metadata["chunk_id"] = self._global_chunk_counter
             self._global_chunk_counter += 1
+
         return split_docs
 
+    def save_chunks_to_local(self, documents: List[Document], output_dir: str = "data/chunk_documents") -> None:
+        """
+        保存切块到本地
+        注意：此处修改了默认路径以匹配 load_directory 中的逻辑，或者反之亦可，需保持一致。
+        """
+        if not documents:
+            print("警告: 没有文档块需要保存。")
+            return
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        for doc in documents:
+            chunk_id = doc.metadata.get("chunk_id", 0)
+            source_path = doc.metadata.get("source", "unknown_file")
+            base_name = os.path.splitext(os.path.basename(source_path))[0]
+
+            # 生成文件名
+            filename = f"chunk_{chunk_id:04d}_{base_name}.md"  # 建议使用 .md 以便查看格式
+            filepath = os.path.join(output_dir, filename)
+
+            # 构建内容 (带元数据头部)
+            metadata_str = "---\n"
+            for key, value in doc.metadata.items():
+                # 简单的转义，防止 YAML 格式错误
+                value_str = str(value).replace("\n", " ")
+                metadata_str += f"{key}: {value_str}\n"
+            metadata_str += "---\n\n"
+            content = metadata_str + doc.page_content
+            try:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                print(f"保存文件失败 {filepath}: {e}")
+
     def process_documents(self, input_path: str) -> List[Document]:
-        """统一的文档处理入口方法"""
+        """统一入口"""
         if os.path.isfile(input_path):
-            docs = self.load_document(input_path)
+            return self.load_document(input_path)
         elif os.path.isdir(input_path):
-            docs = self.load_directory(input_path)
+            return self.load_directory(input_path)
         else:
-            raise ValueError(f"Invalid path: {input_path}")
-        return docs
-
-
-def save_chunks_to_files(processor: DocumentProcessor, input_path: str, output_dir: str = "debug_chunks"):
-    """
-    将处理后的分块保存为文本文件，方便肉眼排查
-    """
-    print(f"正在将文档 {input_path} 切分为 chunks 并保存到 {output_dir} ...")
-
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 调用处理器获取分块
-    chunks = processor.process_documents(input_path)
-
-    # 清空目录下的旧文件（可选）
-    # for f in os.listdir(output_dir): os.remove(os.path.join(output_dir, f))
-
-    # 保存每个分块为单独的文件
-    for i, chunk in enumerate(chunks):
-        chunk_id = chunk.metadata.get("chunk_id", i)
-        source = os.path.basename(chunk.metadata.get("source", "unknown"))
-
-        # 文件名： chunk_0001_source_xxx.txt
-        filename = f"chunk_{chunk_id:04d}_{source}.txt"
-        filepath = os.path.join(output_dir, filename)
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(f"=== Source: {source} ===\n")
-            f.write(f"=== Chunk ID: {chunk_id} ===\n")
-            f.write(f"=== Content Length: {len(chunk.page_content)} ===\n\n")
-            f.write(chunk.page_content)
-
-    print(f" 完成分块保存！共保存了 {len(chunks)} 个分块。")
-    return chunks
+            raise ValueError(f"无效路径: {input_path}")
 
 
 documentProcessor = DocumentProcessor()

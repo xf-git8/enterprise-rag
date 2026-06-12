@@ -1,10 +1,15 @@
 import os,uvicorn
 from src.config import Config
 from src.qa_chain import qa_chain
-from src.document_loader import documentProcessor,save_chunks_to_files
+from src.document_loader import documentProcessor
 
 def run_api():
-    save_chunks_to_files(documentProcessor, './data/documents', './data/chunk_documents')
+    docs = documentProcessor.process_documents('./data/documents')
+    if docs:
+
+        documentProcessor.save_chunks_to_local( docs, './data/chunk_documents')
+    else:
+        print("警告：没有提取到任何文档内容！")
     print(f"启动 API 服务: http://{Config.API_HOST}:{Config.API_PORT}")
     print(f"API 文档: http://{Config.API_HOST}:{Config.API_PORT}/docs")
     # reload=True 会在代码修改后自动重启服务
