@@ -5,7 +5,7 @@ __pycache__/
 venv/
 env/
 
-# Secrets
+ Secrets
 .env
 # IDE
 .idea/
