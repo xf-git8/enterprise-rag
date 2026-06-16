@@ -36,10 +36,8 @@ class QAChain:
         """
         # 1. 检索与问题相关的上下文文档
         context_docs = self.retrieve_context(question, top_k)
-
         # 2. 构建 Prompt
         prompt = self.prompt_build.build_prompt(question, context_docs)
-
         # 3. 调用大模型
         raw_answer = llm_client.generate(prompt)
 
