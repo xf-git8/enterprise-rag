@@ -2,11 +2,11 @@ import os,uvicorn
 from src.config import Config
 from src.qa_chain import qa_chain
 from src.document_loader import documentProcessor
-
+#在 main.py 最开头添加环境变量（避免 attention 实现错误）
+os.environ["TORCH_ATTENTION_IMPLEMENTATION"] = "eager"
 def run_api():
     docs = documentProcessor.process_documents('./data/documents')
     if docs:
-
         documentProcessor.save_chunks_to_local( docs, './data/chunk_documents')
     else:
         print("警告：没有提取到任何文档内容！")
