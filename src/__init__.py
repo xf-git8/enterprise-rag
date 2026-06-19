@@ -1,9 +1,10 @@
 from src .config import Config
-from src.document_loader import DocumentProcessor
+from src.doucments.document_loader import DocumentProcessor
 from src.vector_store import VectorStoreManager,vector_store_manager
 from src.qa_chain import QAChain, qa_chain
 from src.llm_client import LLMClient,llm_client
 from src.api import app
+from src.doucments.ranker import Ranker,ranker
 
 __all__ = [
     "Config",
@@ -14,5 +15,7 @@ __all__ = [
     "llm_client",
     "QAChain",
     "qa_chain",
+    "Ranker",
+    "ranker",
     "app"
 ]

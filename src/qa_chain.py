@@ -1,77 +1,113 @@
-# 问答链核心管理类
-# 负责串联向量数据库检索、Prompt 组装和大语言模型生成
-# 实现端到端的基于外部知识库的问答功能
+# src/qa_chain.py
 import re
+import hashlib
+import logging
 from typing import List, Optional, Dict, Any
 from langchain_core.documents import Document
 from src.config import config
 from src.llm_client import llm_client
 from src.prompt_template import prompt_build
 from src.vector_store import vector_store_manager
+from src.doucments.ranker import Ranker,ranker
+
+logger = logging.getLogger(__name__)
 
 
 class QAChain:
     def __init__(self):
-        """初始化问答链所需的各个基础组件"""
-        # 大语言模型客户端，用于文本生成
         self.llm = llm_client
-        # Prompt 构建器，用于格式化输入模板
         self.prompt_build = prompt_build
-        # 向量存储管理器，用于文档检索
         self.vector_store_manager = vector_store_manager
+        self.ranker = Ranker()
 
-    def retrieve_context(self, question: Optional[str] = None, top_k: int = None) -> List[Document]:
-        """
-        从向量数据库中检索与用户问题相关的上下文文档片段。
-        :param question: 用户问题
-        :param top_k: 需要返回的最相关文档数量。若未传入则使用全局配置。
-        :return: List[document]
-        """
+    def retrieve_context(self, question: str, top_k: int = None) -> List[Document]:
         k = top_k or config.TOP_K
         return self.vector_store_manager.search_documents(question, top_k=k)
 
+    def _extract_citations(self, raw_answer: str) -> List[int]:
+        """增强版引用解析，兼容多种格式"""
+        patterns = [
+            r'\[(\d+)\]',    # [1] [2]
+            r'【(\d+)】',    # 【1】【2】
+        ]
+        indices = set()
+        for pattern in patterns:
+            indices.update(int(m) for m in re.findall(pattern, raw_answer))
+        return sorted(indices)
+
+    def _snippet_fingerprint(self, content: str) -> str:
+        """用哈希做指纹，比截断字符串更可靠"""
+        return hashlib.md5(content[:300].encode()).hexdigest()
+
     def answer(self, question: str, top_k: int = None) -> Dict[str, Any]:
         """
-        调用大模型生成回答
+        完整调用链路：粗召回 → 重排序 → Prompt组装 → LLM生成 → 引用解析
         """
-        # 1. 检索与问题相关的上下文文档
-        context_docs = self.retrieve_context(question, top_k)
-        # 2. 构建 Prompt
-        prompt = self.prompt_build.build_prompt(question, context_docs)
-        # 3. 调用大模型
-        raw_answer = llm_client.generate(prompt)
+        final_k = top_k or config.TOP_K
 
-        # 4. 【核心逻辑】动态解析引用来源并去重
-        cited_indices = set(re.findall(r'\[(\d+)\]', raw_answer))
+        # ====== 阶段一：粗召回（多取 3 倍） ======
+        recall_k = final_k * 3
+        context_docs = self.retrieve_context(question, top_k=recall_k)
 
-        seen_snippets = set()  # 用于记录已经出现过的摘要内容（指纹）
+        if not context_docs:
+            return {"answer": "未找到相关信息，请换个问题试试。", "sources": []}
+
+        # ====== 阶段二：重排序（精排） ======
+        # 2.1 预计算 IDF
+        all_contents = [doc.page_content for doc in context_docs]
+        self.ranker.build_idf(all_contents)
+
+        # 2.2 构造 Ranker 输入
+        docs_for_rerank = []
+        for i, doc in enumerate(context_docs):
+            docs_for_rerank.append({
+                "id": i,
+                "content": doc.page_content,
+                "vector_score": doc.metadata.get("score", 0),
+                "doc": doc,  # 保留原始 Document 对象
+            })
+
+        # 2.3 执行 RRF 重排序
+        reranked = self.ranker.rrf_rerank(question, docs_for_rerank, top_k=final_k)
+
+        # 2.4 取重排后的 Document 列表
+        final_docs = [item["doc"] for item in reranked]
+
+        # ====== 阶段三：Prompt 组装 + LLM 生成 ======
+        try:
+            prompt = self.prompt_build.build_prompt(question, final_docs)
+            raw_answer = self.llm.generate(prompt)
+
+            if not raw_answer or not raw_answer.strip():
+                return {"answer": "模型未返回有效回答，请重试。", "sources": []}
+
+        except Exception as e:
+            logger.error(f"LLM 调用失败: {e}")
+            return {"answer": f"回答生成失败：{str(e)}", "sources": []}
+
+        # ====== 阶段四：引用解析 + 去重 ======
+        cited_indices = self._extract_citations(raw_answer)
+        seen_fingerprints = set()
         sources_list = []
 
-        for idx_str in sorted(cited_indices, key=int):
-            idx = int(idx_str) - 1  # 转为0-based索引
+        for idx in cited_indices:
+            doc_idx = idx - 1  # 转为 0-based
+            if 0 <= doc_idx < len(final_docs):
+                doc = final_docs[doc_idx]
+                fingerprint = self._snippet_fingerprint(doc.page_content)
 
-            # 边界检查
-            if 0 <= idx < len(context_docs):
-                doc = context_docs[idx]
-                # 生成摘要指纹
-                snippet = doc.page_content[:150].strip() + "..."
-
-                # 【关键修改】只有当这个片段之前没出现过时，才处理
-                if snippet not in seen_snippets:
-                    # 1. 标记为已见
-                    seen_snippets.add(snippet)
-
-                    # 2. 添加到最终列表 (注意缩进，必须在 if 内部)
+                if fingerprint not in seen_fingerprints:
+                    seen_fingerprints.add(fingerprint)
                     sources_list.append({
-                        "index": int(idx_str),
+                        "index": idx,
                         "source_file": doc.metadata.get("source", "Unknown"),
-                        "snippet": snippet
+                        "snippet": doc.page_content[:150].strip() + "..."
                     })
 
-        # 5. 返回结果
         return {
             "answer": raw_answer,
             "sources": sources_list
         }
+
 
 qa_chain = QAChain()
