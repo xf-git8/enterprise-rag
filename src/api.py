@@ -10,7 +10,7 @@ class QuestionRequest(BaseModel):
     top_k: int = 5
 
 
-app = FastAPI(title="企业知识问答系统", description="基于RAG的企业知识问答API")
+app = FastAPI(title="企业知识问答", description="基于RAG的企业知识问答API")
 
 
 @app.post("/api/qa", tags=["问答接口"])

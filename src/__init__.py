@@ -1,5 +1,5 @@
 from src .config import Config
-from src.doucments.document_loader import DocumentProcessor
+from src.doucments.document_loader import DocumentProcessor,documentProcessor
 from src.vector_store import VectorStoreManager,vector_store_manager
 from src.qa_chain import QAChain, qa_chain
 from src.llm_client import LLMClient,llm_client
@@ -11,6 +11,7 @@ __all__ = [
     "DocumentProcessor",
     "VectorStoreManager",
     "vector_store_manager",
+    "documentProcessor",
     "LLMClient",
     "llm_client",
     "QAChain",
