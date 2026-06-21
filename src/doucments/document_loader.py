@@ -1,14 +1,12 @@
-import os, re
+import os, re, json
 from PIL import Image
+import platform,chardet
 import pdfplumber, pytesseract
-import platform, chardet, tempfile
 from pdf2image import convert_from_path
 from docx import Document as DocxDocument
 from typing import List, Dict, Any, Optional
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-
 class DocumentProcessor:
     """
     文档处理主类（单文件整合版）
@@ -88,9 +86,7 @@ class DocumentProcessor:
         """
         根据层级进行粗切分
         :param text: 原始文本
-        :param max_split_level: 最大允许切分的标题层级。
-        2 表示只在一级标题(1)和二级标题(2)处切分，
-        三级(3)及以下标题将保留在同一个文本块内
+        :param max_split_level: 最大允许切分的标题层级
         """
         hierarchy_info = self._detect_hierarchy(text)
         if not hierarchy_info:
@@ -99,35 +95,64 @@ class DocumentProcessor:
         lines = text.split("\n")
         chunks = []
         current_start = 0
-
-        for info in hierarchy_info:
+        # 思路：如果连续多个"标题"之间没有实质内容（行数很少），
+        # 说明它们是目录条目，不作为切分点
+        split_points = []
+        i = 0
+        while i < len(hierarchy_info):
+            info = hierarchy_info[i]
             level = info.get("level", 99)
             end_line = info["line_num"]
-
-            # 核心修改：只有当标题层级 <= 设定阈值时，才将其作为切分点
             if level <= max_split_level and end_line > current_start:
+                # 检查这个标题到下一个标题之间是否有足够的正文内容
+                # 如果间距太小（<=2行），大概率是目录条目
+                next_line = hierarchy_info[i + 1]["line_num"] if i + 1 < len(hierarchy_info) else len(lines)
+                content_lines = next_line - end_line
+
+                if content_lines > 2:
+                    # 有实质内容，作为切分点
+                    split_points.append(info)
+                # 否则跳过，认为是目录条目
+            i += 1
+
+        # 如果没有有效的切分点，返回全文
+        if not split_points:
+            return [text]
+        for info in split_points:
+            end_line = info["line_num"]
+            if end_line > current_start:
                 chunk_text = "\n".join(lines[current_start:end_line]).strip()
                 if chunk_text:
                     chunks.append(chunk_text)
                 current_start = end_line
+        # 添加最后一块（从最后一个切分点到文末）—— 在循环外部
+        if current_start < len(lines):
+            last_chunk = "\n".join(lines[current_start:]).strip()
+            if last_chunk:
+                chunks.append(last_chunk)
 
-            if current_start < len(lines):
-                # 添加最后一块（从最后一个切分点到文末）
-
-                last_chunk = "\n".join(lines[current_start:]).strip()
-                if last_chunk:
-                    chunks.append(last_chunk)
-
-            return chunks if chunks else [text]
+        return chunks if chunks else [text]
 
     # ==========================================
     # 内部类 1: OCR 服务
     # ==========================================
     class _OcrService:
         """负责图片转文字及表格识别"""
-
-        def recognize_image(self, image: Image.Image) -> str:
+        def recognize_image(self, image) -> str:
             try:
+                # 【新增】类型检查和转换，兼容 str, bytes, PIL.Image
+                if isinstance(image, str):
+                    # 如果传入的是文件路径，则打开它
+                    image = Image.open(image)
+                elif isinstance(image, bytes):
+                    # 如果是字节流，尝试从字节流加载
+                    from io import BytesIO
+                    image = Image.open(BytesIO(image))
+                elif not isinstance(image, Image.Image):
+                    # 其他未知类型
+                    raise ValueError(f"Unsupported image type: {type(image)}")
+                # 确保图片已加载到内存，防止源文件被占用或关闭
+                image.load()
                 text = pytesseract.image_to_string(image, lang="chi_sim+eng")
                 return text.strip()
             except Exception as e:
@@ -144,10 +169,7 @@ class DocumentProcessor:
 
         def extract_text(self, file_path: str) -> str:
             full_text = ""
-            outline_text = self._extract_outline(file_path)
-            if outline_text:
-                full_text += outline_text + "\n\n"
-
+            # 【修改】禁用目录提取，避免污染正文
             try:
                 with pdfplumber.open(file_path) as pdf:
                     for page in pdf.pages:
@@ -178,32 +200,11 @@ class DocumentProcessor:
             except Exception as e:
                 print(f"pdfplumber 解析失败，尝试全量 OCR: {e}")
                 # 降级方案...
-
             return full_text.strip()
-
         def _extract_outline(self, file_path: str) -> str:
-            """修复后的 PDF 目录提取逻辑"""
-            try:
-                with pdfplumber.open(file_path) as pdf:
-                    if hasattr(pdf, '_pdf') and pdf._pdf and pdf._pdf.doc and pdf._pdf.doc.catalog:
-                        outlines = pdf._pdf.doc.catalog.get("Outlines")
-                        if outlines:
-                            def parse_outline(outline_obj, level=1):
-                                result = []
-                                for item in outline_obj:
-                                    if isinstance(item, dict):
-                                        title = item.get("title", "").strip()
-                                        if title:
-                                            result.append("#" * min(level, 3) + " " + title)
-                                        if "children" in item:
-                                            result.extend(parse_outline(item["children"], level + 1))
-                                return result
-
-                            outline_list = parse_outline(outlines)
-                            if outline_list:
-                                return "\n".join(outline_list)
-            except Exception as e:
-                print(f"提取PDF目录失败: {e}")
+            """
+            PDF 目录提取（已禁用）原因：目录条目会被 _detect_hierarchy 重复识别为标题，
+            """
             return ""
 
     # ==========================================
@@ -216,27 +217,20 @@ class DocumentProcessor:
         def extract_text(self, file_path: str) -> str:
             doc = DocxDocument(file_path)
             full_text = []
-
             for para in doc.paragraphs:
                 full_text.append(para.text)
-
             # 提取图片并进行 OCR
             for rel in doc.part.rels.values():
                 if "image" in rel.reltype:
                     try:
-                        image_data = rel.target_part.blob
-                        temp_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                        temp_img.write(image_data)
-                        temp_img.close()
-
-                        img = Image.open(temp_img.name)
-                        ocr_text = self.ocr_service.recognize_image(img)
+                        # 【修改】直接使用字节流，不再创建临时文件
+                        image_blob = rel.target_part.blob
+                        # 将字节流直接传递给 OCR 服务
+                        ocr_text = self.ocr_service.recognize_image(image_blob)
                         if ocr_text:
                             full_text.append("\n[Image Content]:\n" + ocr_text)
-                        os.unlink(temp_img.name)
                     except Exception as e:
                         print(f"Word 图片 OCR 失败: {e}")
-
             return "\n\n".join(full_text).strip()
 
     # ==========================================
@@ -281,7 +275,6 @@ class DocumentProcessor:
     def load_document(self, file_path: str) -> List[Document]:
         ext = os.path.splitext(file_path)[1].lower()
         text = ""
-
         if ext == ".pdf":
             text = self.pdf_handler.extract_text(file_path)
             f_type = "pdf"
@@ -291,8 +284,8 @@ class DocumentProcessor:
         elif ext == ".txt":
             with open(file_path, "rb") as f:
                 raw = f.read(10240)
-                result = chardet.detect(raw)
-                encoding = result["encoding"] if result["confidence"] > 0.7 else "utf-8"
+            result = chardet.detect(raw)
+            encoding = result["encoding"] if result["confidence"] > 0.7 else "utf-8"
             try:
                 with open(file_path, "r", encoding=encoding) as f:
                     text = f.read()
@@ -325,12 +318,11 @@ class DocumentProcessor:
             return []
 
     # ==================================================
-    # 核心逻辑：文档切分 (已修复)
+    # 核心逻辑：文档切分
     # ==================================================
     def split_documents(self, documents: List[Document]) -> List[Document]:
         if self.text_splitter is None:
             raise ValueError("切分器未初始化")
-
         all_split_docs = []
         for doc in documents:
             content = doc.page_content
@@ -344,15 +336,14 @@ class DocumentProcessor:
                     self._global_chunk_counter += 1
                     all_split_docs.append(chunk)
                 continue
+
             # 1. 提取所有标题行号和信息
             header_spans = []
             current_header = None
-
             for line_num, line in enumerate(lines):
                 line_stripped = line.strip()
                 if not line_stripped:
                     continue
-
                 is_header = False
                 header_data = None
                 for pattern, pattern_type in self._hierarchy_patterns:
@@ -390,20 +381,15 @@ class DocumentProcessor:
                 start = span["start"]
                 end = span["end"]
                 header_info = span["header"]
-
                 block_lines = lines[start:end + 1]
                 block_text = "\n".join(block_lines).strip()
-
                 if not block_text:
                     continue
-
                 temp_doc = Document(
                     page_content=block_text,
                     metadata=doc.metadata.copy()
                 )
-
                 chunks = self.text_splitter.split_documents([temp_doc])
-
                 for chunk in chunks:
                     chunk.metadata["hierarchy"] = {
                         "type": header_info["type"],
@@ -413,7 +399,6 @@ class DocumentProcessor:
                     title_prefix = "#" * header_info["level"] + " " + header_info["content"]
                     if not chunk.page_content.startswith(title_prefix):
                         chunk.page_content = title_prefix + "\n\n" + chunk.page_content
-
                     chunk.metadata["chunk_id"] = self._global_chunk_counter
                     self._global_chunk_counter += 1
                     all_split_docs.append(chunk)
@@ -422,20 +407,17 @@ class DocumentProcessor:
         # chromaDB 不支持 字典需要序列化为json字符串，
         # 需要将 None 转为空字符串
         clean_chunks = []
-        for doc in all_split_docs:  # 注意：这里变量名改为 all_split_docs
+        for doc in all_split_docs:
             # 复制一份元数据，避免修改原对象
             new_meta = doc.metadata.copy()
-
             # 遍历所有元数据字段
             for k, v in new_meta.items():
                 # 如果值是字典、列表或复杂对象，强制转为 JSON 字符串
                 if isinstance(v, (dict, list)):
-                    import json
                     new_meta[k] = json.dumps(v, ensure_ascii=False)
                 # ChromaDB 也不支持 None，建议转为空字符串
                 elif v is None:
                     new_meta[k] = ""
-
             # 更新文档的元数据
             doc.metadata = new_meta
             clean_chunks.append(doc)
@@ -443,51 +425,37 @@ class DocumentProcessor:
         return clean_chunks  # 返回清洗后的数据
 
     def save_chunks_to_local(self, documents: List[Document], output_dir: str = "data/chunk_documents") -> None:
-
         if not documents:
             print("警告: 没有文档块需要保存。")
             return
         os.makedirs(output_dir, exist_ok=True)
-
         # 使用 enumerate 获取全局索引，防止不同文件的 chunk_id 重复导致覆盖
         for global_idx, doc in enumerate(documents):
             chunk_id = doc.metadata.get("chunk_id", global_idx)
             source_path = doc.metadata.get("source", "unknown_file")
-
             # 处理文件名，确保唯一性
             base_name = os.path.splitext(os.path.basename(source_path))[0]
-
-            # 【优化】加入 global_idx 避免不同文件间的同名覆盖
             # 格式示例: chunk_0001_policy_A.md
             filename = f"chunk_{global_idx:04d}_{base_name}.md"
             filepath = os.path.join(output_dir, filename)
-
-            # 【关键修复】以下内容必须缩进到 for 循环内部！
             metadata_str = "---\n"
             for key, value in doc.metadata.items():
                 value_str = str(value).replace("\n", " ")
                 metadata_str += f"{key}: {value_str}\n"
             metadata_str += "---\n\n"
-
             content = metadata_str + doc.page_content
-
             try:
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(content)
-                # 可选：打印进度，确认正在生成多个文件
-                # print(f"已保存: {filename}")
             except Exception as e:
                 print(f"保存文件失败 {filepath}: {e}")
 
     def process_documents(self, input_path: str) -> List[Document]:
-
         if os.path.isfile(input_path):
             return self.load_document(input_path)
         elif os.path.isdir(input_path):
             return self.load_directory(input_path)
         else:
             raise ValueError(f"无效路径: {input_path}")
-
-
 # 全局实例
 documentProcessor = DocumentProcessor()
